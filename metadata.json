@@ -1,0 +1,8 @@
+{
+  "name": "Sir Larex Casual",
+  "description": "Premium inventory and order management system for SLC, featuring luxury collection gallery and WhatsApp-integrated ordering.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
