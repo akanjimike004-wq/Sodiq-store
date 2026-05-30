@@ -1,17 +1,15 @@
 import React, { useState, useEffect, FormEvent } from 'react';
 import { 
-  getDocs, 
-  collection, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  doc, 
-  query, 
-  orderBy,
-  onSnapshot
-} from 'firebase/firestore';
-import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { db, auth, OperationType, handleFirestoreError } from './services/firebase';
+  supabase, 
+  Product, 
+  Order, 
+  OrderItem, 
+  Return, 
+  mapProduct, 
+  mapOrder, 
+  mapReturn 
+} from './services/supabase';
+
 import { 
   LayoutDashboard, 
   Package, 
@@ -34,7 +32,8 @@ import {
   TrendingUp,
   DollarSign,
   AlertCircle,
-  Upload
+  Upload,
+  Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -53,62 +52,39 @@ import {
 } from 'recharts';
 
 // --- Types ---
-interface Product {
-  id: string;
-  name: string;
-  description: string;
-  price: number;
-  category: string;
-  stock: number;
-  sku: string;
-  imageUrl: string;
-}
-
-interface OrderItem {
-  productId: string;
-  name: string;
-  quantity: number;
-  price: number;
-}
-
-interface Order {
-  id: string;
-  customerName: string;
-  customerPhone: string;
-  items: OrderItem[];
-  total: number;
-  status: 'pending' | 'processing' | 'shipped' | 'delivered' | 'cancelled' | 'returned';
-  whatsappLink: string;
-  createdAt: any;
-}
-
-interface Return {
-  id: string;
-  orderId: string;
-  items: any[];
-  reason: string;
-  status: 'pending' | 'received' | 'inspected' | 'completed';
-  createdAt: any;
-}
-
-type View = 'public' | 'dashboard' | 'inventory' | 'orders' | 'returns' | 'reports';
+type View = 'public' | 'dashboard' | 'inventory' | 'orders' | 'returns' | 'reports' | 'settings';
 
 // --- Components ---
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [isDemoMode, setIsDemoMode] = useState(() => {
-    const saved = localStorage.getItem('slc_demo_mode');
-    return saved === null ? true : saved === 'true'; // Default to true for first visit
-  });
+  const [user, setUser] = useState<any>(null);
   const [activeView, setActiveView] = useState<View>('public');
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [returns, setReturns] = useState<Return[]>([]);
   const [loading, setLoading] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  
+  const [socialSettings, setSocialSettings] = useState({
+    instagram: 'sirlarex_casual',
+    whatsapp: '2349012345678',
+    twitter: 'sirlarex',
+    facebook: 'sirlarex.casual'
+  });
+  
+  // Database connection/setup states
+  const [dbNeedsSetup, setDbNeedsSetup] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [showSetupPanel, setShowSetupPanel] = useState(false);
 
-  // Initial data for demo mode
+  // Authentication Dialog states
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [authError, setAuthError] = useState('');
+
+  // Initial data for seeding and layout fallback
   const INITIAL_PRODUCTS: Product[] = [
     { id: '1', name: 'SLC Signature Linen', description: 'Premium tan linen shirt with bespoke SLC embroidery.', price: 45000, category: 'Bespoke', stock: 12, sku: 'SLC-SIG-001', imageUrl: 'https://images.unsplash.com/photo-1594932224010-74f43a183546?auto=format&fit=crop&q=80&w=400' },
     { id: '2', name: 'Desert Safari Chinos', description: 'Italian-cut slim chinos in SLC signature sand.', price: 38000, category: 'Casual', stock: 5, sku: 'SLC-SAF-002', imageUrl: 'https://images.unsplash.com/photo-1473966968600-fa804b868cca?auto=format&fit=crop&q=80&w=400' },
@@ -128,7 +104,7 @@ export default function App() {
       total: 90000,
       status: 'delivered',
       whatsappLink: 'https://wa.me/2348012345678',
-      createdAt: new Date(Date.now() - 86400000 * 2),
+      createdAt: new Date().toISOString(),
       items: [{ productId: '1', name: 'SLC Signature Linen', quantity: 2, price: 45000 }]
     },
     {
@@ -138,7 +114,7 @@ export default function App() {
       total: 38000,
       status: 'pending',
       whatsappLink: 'https://wa.me/2348098765432',
-      createdAt: new Date(Date.now() - 3600000 * 5),
+      createdAt: new Date().toISOString(),
       items: [{ productId: '2', name: 'Desert Safari Chinos', quantity: 1, price: 38000 }]
     }
   ];
@@ -149,112 +125,205 @@ export default function App() {
       orderId: 'ord-101',
       reason: 'Size exchange requested',
       status: 'pending',
-      createdAt: new Date(),
+      createdAt: new Date().toISOString(),
       items: [{ productId: '1', name: 'SLC Signature Linen', quantity: 1, price: 45000 }]
     }
   ];
 
+  // Fetch all Supabase Data
+  const fetchAllData = async () => {
+    try {
+      // 1. Fetch Products
+      const { data: pData, error: pError } = await supabase
+        .from('products')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (pError) throw pError;
+
+      // Map snake_case to camelCase
+      setProducts((pData || []).map(mapProduct));
+      setDbNeedsSetup(false);
+
+      // 2. Fetch Orders
+      const { data: oData, error: oError } = await supabase
+        .from('orders')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (oError) {
+        console.warn('Orders table loading issue:', oError);
+      } else {
+        setOrders((oData || []).map(mapOrder));
+      }
+
+      // 3. Fetch Returns
+      const { data: rData, error: rError } = await supabase
+        .from('returns')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (rError) {
+        console.warn('Returns table loading issue:', rError);
+      } else {
+        setReturns((rData || []).map(mapReturn));
+      }
+
+      // 4. Fetch Settings
+      try {
+        const { data: sData, error: sError } = await supabase
+          .from('settings')
+          .select('*');
+
+        if (!sError && sData) {
+          const settingsMap: any = {};
+          sData.forEach((row: any) => {
+            settingsMap[row.key] = row.value;
+          });
+          setSocialSettings({
+            instagram: settingsMap.instagram_handle || 'sirlarex_casual',
+            whatsapp: settingsMap.whatsapp_number || '2349012345678',
+            twitter: settingsMap.twitter_handle || 'sirlarex',
+            facebook: settingsMap.facebook_handle || 'sirlarex.casual'
+          });
+        }
+      } catch (sErr) {
+        console.warn('Settings table load issue:', sErr);
+      }
+
+    } catch (err: any) {
+      console.warn('Supabase initialization warning:', err);
+      // Code 42P01: Table not found in PostgreSQL. Graceful loading configuration guidance.
+      if (err?.code === '42P01' || err?.message?.includes('does not exist')) {
+        setDbNeedsSetup(true);
+      }
+      // Populate beautiful defaults in sandbox mode so application doesn't appear empty
+      setProducts(INITIAL_PRODUCTS);
+      setOrders(INITIAL_ORDERS);
+      setReturns(INITIAL_RETURNS);
+    }
+  };
+
+  // Auth Status Listeners
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (u) {
-        setIsDemoMode(false);
-        localStorage.setItem('slc_demo_mode', 'false');
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
         setActiveView('dashboard');
       }
       setLoading(false);
     });
-    return () => unsub();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        setActiveView('dashboard');
+      } else {
+        setActiveView('public');
+      }
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  // Data Persistence logic
+  // Sync data on changes
   useEffect(() => {
-    if (isDemoMode) {
-      const storedProducts = localStorage.getItem('slc_products');
-      const storedOrders = localStorage.getItem('slc_orders');
-      const storedReturns = localStorage.getItem('slc_returns');
+    fetchAllData();
+  }, [user, refreshKey]);
 
-      if (storedProducts) setProducts(JSON.parse(storedProducts));
-      else {
-        setProducts(INITIAL_PRODUCTS);
-        localStorage.setItem('slc_products', JSON.stringify(INITIAL_PRODUCTS));
-      }
-
-      if (storedOrders) setOrders(JSON.parse(storedOrders));
-      else {
-        setOrders(INITIAL_ORDERS);
-        localStorage.setItem('slc_orders', JSON.stringify(INITIAL_ORDERS));
-      }
-
-      if (storedReturns) setReturns(JSON.parse(storedReturns));
-      else {
-        setReturns(INITIAL_RETURNS);
-        localStorage.setItem('slc_returns', JSON.stringify(INITIAL_RETURNS));
-      }
-    }
-  }, [isDemoMode]);
-
-  useEffect(() => {
-    if (isDemoMode) {
-      localStorage.setItem('slc_products', JSON.stringify(products));
-      localStorage.setItem('slc_orders', JSON.stringify(orders));
-      localStorage.setItem('slc_returns', JSON.stringify(returns));
-    }
-  }, [products, orders, returns, isDemoMode]);
-
-  // Real-time data sync for staff views
-  useEffect(() => {
-    if (isDemoMode) return;
-    if (!user) {
-      // Just public products
-      const q = query(collection(db, 'products'), orderBy('createdAt', 'desc'));
-      const unsub = onSnapshot(q, (snap) => {
-        setProducts(snap.docs.map(d => ({ id: d.id, ...d.data() } as Product)));
-      }, (err) => handleFirestoreError(err, OperationType.GET, 'products'));
-      return () => unsub();
-    } else {
-      // All data for staff
-      const unsubProducts = onSnapshot(collection(db, 'products'), (snap) => {
-        setProducts(snap.docs.map(d => ({ id: d.id, ...d.data() } as Product)));
-      }, (err) => handleFirestoreError(err, OperationType.GET, 'products'));
-
-      const unsubOrders = onSnapshot(collection(db, 'orders'), (snap) => {
-        setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
-      }, (err) => handleFirestoreError(err, OperationType.GET, 'orders'));
-
-      const unsubReturns = onSnapshot(collection(db, 'returns'), (snap) => {
-        setReturns(snap.docs.map(d => ({ id: d.id, ...d.data() } as Return)));
-      }, (err) => handleFirestoreError(err, OperationType.GET, 'returns'));
-
-      return () => {
-        unsubProducts();
-        unsubOrders();
-        unsubReturns();
-      };
-    }
-  }, [user, isDemoMode]);
-
-  const handleLogin = async () => {
+  // Auth handlers
+  const handleAuthSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
     try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
-    } catch (err) {
-      console.warn("Firebase Auth Error, showing Demo Mode instead.");
-      enterDemoMode();
+      if (isRegistering) {
+        const { error } = await supabase.auth.signUp({
+          email: loginEmail,
+          password: loginPassword,
+        });
+        if (error) throw error;
+        alert('Registration request submitted! If you configured email verification, verify your link. Otherwise, try logging in directly.');
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: loginEmail,
+          password: loginPassword,
+        });
+        if (error) throw error;
+      }
+      setShowLoginModal(false);
+      setLoginEmail('');
+      setLoginPassword('');
+    } catch (err: any) {
+      setAuthError(err.message || 'Authentication operation failed.');
     }
   };
 
-  const enterDemoMode = () => {
-      setIsDemoMode(true);
-      localStorage.setItem('slc_demo_mode', 'true');
-      setActiveView('dashboard');
+  const [seedingText, setSeedingText] = useState<'Seed DB' | 'Seeding...' | 'Seeded Success!'>('Seed DB');
+  const seedDatabase = async () => {
+    try {
+      setSeedingText('Seeding...');
+      
+      // Seed products
+      for (const p of INITIAL_PRODUCTS) {
+        const { error } = await supabase.from('products').insert([
+          {
+            name: p.name,
+            description: p.description,
+            price: p.price,
+            category: p.category,
+            stock: p.stock,
+            sku: p.sku,
+            image_url: p.imageUrl
+          }
+        ]);
+        if (error) throw error;
+      }
+
+      // Seed orders
+      for (const o of INITIAL_ORDERS) {
+        const { error } = await supabase.from('orders').insert([
+          {
+            customer_name: o.customerName,
+            customer_phone: o.customerPhone,
+            total: o.total,
+            status: o.status,
+            whatsapp_link: o.whatsappLink,
+            items: o.items
+          }
+        ]);
+        if (error) throw error;
+      }
+
+      // Seed returns
+      for (const r of INITIAL_RETURNS) {
+        const { error } = await supabase.from('returns').insert([
+          {
+            order_id: r.orderId,
+            reason: r.reason,
+            status: r.status,
+            items: r.items
+          }
+        ]);
+        if (error) throw error;
+      }
+
+      setSeedingText('Seeded Success!');
+      setDbNeedsSetup(false);
+      setRefreshKey(prev => prev + 1);
+      setTimeout(() => setSeedingText('Seed DB'), 3000);
+    } catch (err: any) {
+      console.error(err);
+      alert(`Could not seed: ${err.message || err}. Please execute the SQL table schema instructions first in your Supabase SQL Editor!`);
+      setSeedingText('Seed DB');
+    }
   };
 
-  const handleLogout = () => {
-    signOut(auth);
-    setIsDemoMode(false);
-    localStorage.setItem('slc_demo_mode', 'false');
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
     setActiveView('public');
   };
+
 
   if (loading) {
     return (
@@ -269,58 +338,307 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-surface flex flex-col md:flex-row">
-      {/* Sidebar for Staff */}
-      {(user || isDemoMode) && activeView !== 'public' && (
-        <Sidebar activeView={activeView} setView={setActiveView} handleLogout={handleLogout} />
+    <div className="min-h-screen bg-surface flex flex-col">
+      {/* DB Wiring Notice Support for public & staff if tables are missing */}
+      {dbNeedsSetup && (
+        <div className="bg-amber-600 text-white px-6 py-3 flex text-xs md:text-sm flex-col md:flex-row items-center justify-between gap-4 font-sans font-bold tracking-wide shadow-md shrink-0">
+          <div className="flex items-center gap-2">
+            <AlertCircle size={16} />
+            <span>🔌 Setup Required: Create required tables in your Supabase project (biztvougwbgbqmwttezh) to activate persistent storage.</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setShowSetupPanel(true)} 
+              className="px-4 py-1.5 bg-white text-stone-900 rounded-full hover:bg-stone-100 transition-colors uppercase text-[10px] font-mono tracking-widest"
+            >
+              View SQL Schema
+            </button>
+            <button 
+              onClick={seedDatabase} 
+              disabled={seedingText === 'Seeding...'}
+              className="px-4 py-1.5 bg-stone-950 text-white rounded-full hover:bg-black transition-colors uppercase text-[10px] font-mono tracking-widest"
+            >
+              {seedingText}
+            </button>
+          </div>
+        </div>
       )}
 
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col h-screen overflow-hidden">
-        <Header 
-          user={user} 
-          isDemoMode={isDemoMode}
-          activeView={activeView} 
-          onLogin={handleLogin} 
-          onLogout={handleLogout} 
-          setView={setViewAndCloseMenu}
-          enterDemoMode={enterDemoMode}
-          mobileMenuOpen={mobileMenuOpen}
-          setMobileMenuOpen={setMobileMenuOpen}
-        />
+      <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden">
+        {/* Sidebar for Staff */}
+        {user && activeView !== 'public' && (
+          <Sidebar activeView={activeView} setView={setActiveView} handleLogout={handleLogout} />
+        )}
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-8" id="main-scroll-container">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeView}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.3 }}
-              className="max-w-7xl mx-auto"
-            >
-              {activeView === 'public' && <PublicGallery products={products} setView={setViewAndCloseMenu} isStaff={!!(user || isDemoMode)} />}
-              {activeView === 'dashboard' && <StaffDashboard products={products} orders={orders} setView={setActiveView} />}
-              {activeView === 'inventory' && <InventoryManager products={products} setProducts={setProducts} />}
-              {activeView === 'orders' && <OrderManager orders={orders} products={products} setOrders={setOrders} />}
-              {activeView === 'returns' && <ReturnsManager returns={returns} orders={orders} setReturns={setReturns} />}
-              {activeView === 'reports' && <ReportingSystem orders={orders} products={products} />}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-      </main>
-      
+        {/* Main Content Area */}
+        <main className="flex-1 flex flex-col h-screen overflow-hidden">
+          <Header 
+            user={user} 
+            activeView={activeView} 
+            onLogin={() => {
+              setIsRegistering(false);
+              setAuthError('');
+              setShowLoginModal(true);
+            }} 
+            onLogout={handleLogout} 
+            setView={setViewAndCloseMenu}
+            mobileMenuOpen={mobileMenuOpen}
+            setMobileMenuOpen={setMobileMenuOpen}
+          />
+
+          <div className="flex-1 overflow-y-auto p-4 md:p-8" id="main-scroll-container">
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activeView}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.3 }}
+                className="max-w-7xl mx-auto"
+              >
+                {activeView === 'public' && <PublicGallery products={products} setView={setViewAndCloseMenu} isStaff={!!user} socialSettings={socialSettings} />}
+                {activeView === 'dashboard' && <StaffDashboard products={products} orders={orders} setView={setActiveView} />}
+                {activeView === 'inventory' && <InventoryManager products={products} setProducts={setProducts} />}
+                {activeView === 'orders' && <OrderManager orders={orders} products={products} setOrders={setOrders} />}
+                {activeView === 'returns' && <ReturnsManager returns={returns} orders={orders} setReturns={setReturns} />}
+                {activeView === 'reports' && <ReportingSystem orders={orders} products={products} />}
+                {activeView === 'settings' && <SettingsManager socialSettings={socialSettings} setSocialSettings={setSocialSettings} />}
+              </motion.div>
+            </AnimatePresence>
+          </div>
+        </main>
+      </div>
+
       <MobileNav 
         isOpen={mobileMenuOpen} 
         setIsOpen={setMobileMenuOpen} 
         activeView={activeView} 
         setView={setViewAndCloseMenu}
         user={user}
-        isDemoMode={isDemoMode}
-        onLogin={handleLogin}
+        onLogin={() => {
+          setIsRegistering(false);
+          setAuthError('');
+          setShowLoginModal(true);
+          setMobileMenuOpen(false);
+        }}
         onLogout={handleLogout}
-        enterDemoMode={enterDemoMode}
       />
+
+      {/* Database Setup Help Overlay */}
+      {showSetupPanel && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-sm">
+          <div className="bg-white w-full max-w-3xl p-8 rounded-3xl shadow-2xl relative max-h-[85vh] overflow-y-auto">
+            <button 
+              onClick={() => setShowSetupPanel(false)} 
+              className="absolute top-6 right-6 text-stone-400 hover:text-stone-900 font-sans text-xl"
+            >
+              ✕
+            </button>
+            <div className="space-y-6 text-stone-800">
+              <div className="border-b border-stone-100 pb-4">
+                <h3 className="text-2xl font-serif font-bold text-stone-950">🛠️ Supabase Database Wiring Guide</h3>
+                <p className="text-sm text-stone-500">Initialize the required database tables for the 'Sodiq Work' project on your Supabase panel.</p>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="font-bold text-sm uppercase text-stone-400 tracking-widest">Step 1: Open Your SQL Editor</h4>
+                <p className="text-sm">Go to your Supabase Dashboard for project <span className="font-mono bg-stone-100 px-2 py-0.5 rounded text-stone-600">biztvougwbgbqmwttezh</span>, click on the **SQL Editor** tab from the left sidebar, and click **New Query**.</p>
+              </div>
+
+              <div className="space-y-3">
+                <h4 className="font-bold text-sm uppercase text-stone-400 tracking-widest">Step 2: Copy & Execute This Schema Query</h4>
+                <div className="relative group bg-stone-900 text-stone-200 p-5 rounded-2xl text-xs font-mono overflow-x-auto max-h-60 leading-relaxed shadow-inner">
+                  <pre id="sql-schema-code">
+{`-- Create Products table
+CREATE TABLE IF NOT EXISTS products (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    price NUMERIC NOT NULL,
+    category TEXT,
+    stock INTEGER NOT NULL DEFAULT 0,
+    sku TEXT UNIQUE NOT NULL,
+    image_url TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Enable RLS for Products
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+
+-- Allow public read access to products
+CREATE POLICY "Allow public select" ON products FOR SELECT USING (true);
+
+-- Allow authenticated staffs full write access
+CREATE POLICY "Allow authenticated full write on products" ON products FOR ALL USING (auth.role() = 'authenticated');
+
+-- Create Orders table
+CREATE TABLE IF NOT EXISTS orders (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    customer_name TEXT NOT NULL,
+    customer_phone TEXT NOT NULL,
+    items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    total NUMERIC NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    whatsapp_link TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Enable RLS for Orders
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+-- Allow public clients to submit orders (for checkout)
+CREATE POLICY "Allow public insert on orders" ON orders FOR INSERT WITH CHECK (true);
+
+-- Allow authenticated staffs full read and write access
+CREATE POLICY "Allow authenticated full access to orders" ON orders FOR ALL USING (auth.role() = 'authenticated');
+
+-- Create Returns table
+CREATE TABLE IF NOT EXISTS returns (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Enable RLS for Returns
+ALTER TABLE returns ENABLE ROW LEVEL SECURITY;
+
+-- Allow public clients to flag returns
+CREATE POLICY "Allow public insert on returns" ON returns FOR INSERT WITH CHECK (true);
+
+-- Allow authenticated staffs full read and write access
+CREATE POLICY "Allow authenticated full access to returns" ON returns FOR ALL USING (auth.role() = 'authenticated');
+
+-- Create Settings table
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Enable RLS for Settings
+ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+
+-- Allow public read access to settings
+CREATE POLICY "Allow public select on settings" ON settings FOR SELECT USING (true);
+
+-- Allow authenticated staffs full write access to settings
+CREATE POLICY "Allow authenticated full write on settings" ON settings FOR ALL USING (auth.role() = 'authenticated');
+
+-- Seed settings table
+INSERT INTO settings (key, value) VALUES 
+('whatsapp_number', '2349012345678'),
+('instagram_handle', 'sirlarex_casual'),
+('twitter_handle', 'sirlarex'),
+('facebook_handle', 'sirlarex.casual')
+ON CONFLICT (key) DO NOTHING;`}
+                  </pre>
+                  <button 
+                    onClick={() => {
+                      const codeNode = document.getElementById('sql-schema-code');
+                      if (codeNode) {
+                        navigator.clipboard.writeText(codeNode.innerText);
+                        alert('SQL Schema copied to clipboard successfully!');
+                      }
+                    }}
+                    className="absolute top-4 right-4 bg-amber-500 text-white px-3 py-1 text-[10px] uppercase font-bold rounded-lg hover:bg-amber-600 shadow-md"
+                  >
+                    Copy Script
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-4 border-t border-stone-100">
+                <h4 className="font-bold text-sm uppercase text-stone-400 tracking-widest">Step 3: Click Seed Database</h4>
+                <p className="text-sm text-stone-500">Once the tables are created, click the button below to automatically load the initial catalog of 8 premium garments, orders, and diagnostic stats directly into your database tables in one-go!</p>
+                <div className="flex gap-4">
+                  <button 
+                    onClick={seedDatabase}
+                    disabled={seedingText === 'Seeding...'}
+                    className="luxury-button flex-1 py-3 text-center text-white"
+                  >
+                    {seedingText}
+                  </button>
+                  <button 
+                    onClick={() => setShowSetupPanel(false)}
+                    className="px-6 py-3 bg-stone-100 border border-border text-stone-800 rounded-full font-serif"
+                  >
+                    Close Guide
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Staff Authentication Modal */}
+      {showLoginModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-stone-950/75 backdrop-blur-md">
+          <div className="bg-white w-full max-w-md p-8 rounded-3xl shadow-2xl relative border border-border">
+            <button 
+              onClick={() => { setShowLoginModal(false); setAuthError(''); }} 
+              className="absolute top-6 right-6 text-stone-400 hover:text-stone-900"
+            >
+              ✕
+            </button>
+            <form onSubmit={handleAuthSubmit} className="space-y-6">
+              <div className="text-center space-y-2">
+                <h3 className="text-2xl font-serif font-bold text-stone-950">Sir Larex Casual</h3>
+                <p className="text-xs text-stone-400 uppercase tracking-widest font-bold">Staff Account Authorization</p>
+              </div>
+
+              {authError && (
+                <div className="bg-rose-50 border border-rose-150 text-rose-600 p-4 rounded-xl text-xs font-semibold leading-relaxed">
+                  ⚠️ {authError}
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold uppercase text-stone-400 pl-1">Email Address</label>
+                  <input 
+                    type="email" 
+                    required 
+                    value={loginEmail} 
+                    onChange={e => setLoginEmail(e.target.value)} 
+                    className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-2xl focus:outline-none focus:border-brand text-stone-800 text-sm" 
+                    placeholder="sodiq@example.com" 
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold uppercase text-stone-400 pl-1">Password</label>
+                  <input 
+                    type="password" 
+                    required 
+                    value={loginPassword} 
+                    onChange={e => setLoginPassword(e.target.value)} 
+                    className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-2xl focus:outline-none focus:border-brand text-stone-800 text-sm" 
+                    placeholder="••••••••" 
+                  />
+                </div>
+              </div>
+
+              <button type="submit" className="luxury-button w-full py-4 text-center mt-2 text-white">
+                {isRegistering ? 'Create Staff Profile' : 'Authenticate Credentials'}
+              </button>
+
+              <div className="text-center pt-2">
+                <button 
+                  type="button" 
+                  onClick={() => setIsRegistering(!isRegistering)} 
+                  className="text-xs text-stone-500 font-medium hover:underline"
+                >
+                  {isRegistering ? 'Already have a staff profile? Sign In' : "Don't have a staff profile? Register Here"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -342,6 +660,7 @@ function Sidebar({ activeView, setView, handleLogout }: { activeView: View, setV
     { id: 'orders' as View, icon: ShoppingBag, label: 'Orders' },
     { id: 'returns' as View, icon: ArrowRightLeft, label: 'Returns' },
     { id: 'reports' as View, icon: BarChart3, label: 'Reports' },
+    { id: 'settings' as View, icon: Settings, label: 'Settings' },
     { id: 'public' as View, icon: Home, label: 'Public Collection' },
   ];
 
@@ -404,7 +723,7 @@ function Sidebar({ activeView, setView, handleLogout }: { activeView: View, setV
   );
 }
 
-function Header({ user, isDemoMode, activeView, onLogin, onLogout, setView, enterDemoMode, mobileMenuOpen, setMobileMenuOpen }: { user: User | null, isDemoMode: boolean, activeView: View, onLogin: () => void, onLogout: () => void, setView: (v: View) => void, enterDemoMode: () => void, mobileMenuOpen: boolean, setMobileMenuOpen: (o: boolean) => void }) {
+function Header({ user, activeView, onLogin, onLogout, setView, mobileMenuOpen, setMobileMenuOpen }: { user: any, activeView: View, onLogin: () => void, onLogout: () => void, setView: (v: View) => void, mobileMenuOpen: boolean, setMobileMenuOpen: (o: boolean) => void }) {
   return (
     <header className="h-20 bg-white/80 backdrop-blur-md border-b border-border flex items-center justify-between px-6 md:px-12 z-40 relative">
       <div className="flex items-center gap-10">
@@ -412,8 +731,8 @@ function Header({ user, isDemoMode, activeView, onLogin, onLogout, setView, ente
           <div className="w-10 h-10 bg-brand rounded-xl flex items-center justify-center shrink-0 shadow-lg shadow-brand/20">
             <span className="text-white font-serif font-bold text-sm">SLC</span>
           </div>
-          <div className="hidden lg:block">
-            <h1 className="text-lg font-bold font-serif leading-tight tracking-tight uppercase">Sir Larex</h1>
+          <div className="hidden lg:block text-left">
+            <h1 className="text-lg font-bold font-serif leading-tight tracking-tight uppercase text-stone-900">Sir Larex</h1>
             <p className="text-[8px] text-muted tracking-[0.3em] uppercase font-bold">Casual Luxury</p>
           </div>
         </button>
@@ -423,7 +742,7 @@ function Header({ user, isDemoMode, activeView, onLogin, onLogout, setView, ente
           <nav className="hidden md:flex items-center gap-8 border-l border-border pl-10 h-8">
             <button onClick={() => setView('public')} className={`text-sm font-bold uppercase tracking-widest ${activeView === 'public' ? 'text-brand' : 'text-muted hover:text-brand'} transition-colors`}>Home</button>
             <a href="#collection" className="text-sm font-bold uppercase tracking-widest text-muted hover:text-brand transition-colors">Collection</a>
-            {(user || isDemoMode) && (
+            {user && (
               <button onClick={() => setView('dashboard')} className="text-sm font-bold uppercase tracking-widest text-muted hover:text-brand transition-colors">Dashboard</button>
             )}
           </nav>
@@ -431,25 +750,17 @@ function Header({ user, isDemoMode, activeView, onLogin, onLogout, setView, ente
       </div>
 
       <div className="flex items-center gap-4">
-        {/* Indicators */}
-        {isDemoMode && (
-          <span className="hidden sm:inline-block bg-amber-100 text-amber-700 text-[9px] font-black px-3 py-1 rounded-full uppercase tracking-[0.1em]">Preview Mode</span>
-        )}
-
         <div className="flex items-center gap-4">
           <div className="hidden md:flex items-center gap-4">
-            {!(user || isDemoMode) ? (
-              <>
-                <button onClick={enterDemoMode} className="text-xs font-bold uppercase tracking-widest text-muted hover:text-brand">Demo</button>
-                <button onClick={onLogin} className="luxury-button !py-2 !px-6 text-xs uppercase tracking-widest">Login</button>
-              </>
+            {!user ? (
+              <button onClick={onLogin} className="luxury-button !py-2 !px-6 text-xs uppercase tracking-widest text-white">Login</button>
             ) : (
-              <div className="flex items-center gap-3 bg-surface p-1.5 rounded-full pr-4">
-                <div className="w-8 h-8 rounded-full bg-brand/10 flex items-center justify-center overflow-hidden border border-brand/20">
-                  {user?.photoURL ? <img src={user.photoURL} alt="" /> : <UserIcon size={14} className="text-brand" />}
+              <div className="flex items-center gap-3 bg-stone-50 p-1.5 rounded-full pr-4 border border-border">
+                <div className="w-8 h-8 rounded-full bg-brand/10 flex items-center justify-center overflow-hidden border border-brand/20 text-stone-800">
+                  <UserIcon size={14} className="text-brand" />
                 </div>
-                <span className="text-xs font-bold text-ink uppercase tracking-wider">{user?.displayName?.split(' ')[0] || 'Staff'}</span>
-                <button onClick={onLogout} className="text-muted hover:text-red-500 transition-colors ml-2"><LogOut size={16}/></button>
+                <span className="text-xs font-bold text-stone-800 uppercase tracking-wider">{user?.email?.split('@')[0] || 'Staff'}</span>
+                <button onClick={onLogout} className="text-stone-400 hover:text-rose-600 transition-colors ml-2"><LogOut size={16}/></button>
               </div>
             )}
           </div>
@@ -457,7 +768,7 @@ function Header({ user, isDemoMode, activeView, onLogin, onLogout, setView, ente
           {/* Mobile Toggle */}
           <button 
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="md:hidden w-10 h-10 flex items-center justify-center rounded-xl bg-surface border border-border text-ink"
+            className="md:hidden w-10 h-10 flex items-center justify-center rounded-xl bg-stone-50 border border-border text-stone-900"
           >
              {mobileMenuOpen ? "✕" : <Filter size={20} />}
           </button>
@@ -467,7 +778,7 @@ function Header({ user, isDemoMode, activeView, onLogin, onLogout, setView, ente
   );
 }
 
-function MobileNav({ isOpen, setIsOpen, activeView, setView, user, isDemoMode, onLogin, onLogout, enterDemoMode }: any) {
+function MobileNav({ isOpen, setIsOpen, activeView, setView, user, onLogin, onLogout }: any) {
   return (
     <AnimatePresence>
       {isOpen && (
@@ -477,7 +788,7 @@ function MobileNav({ isOpen, setIsOpen, activeView, setView, user, isDemoMode, o
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={() => setIsOpen(false)}
-            className="fixed inset-0 bg-ink/60 backdrop-blur-sm z-[45]"
+            className="fixed inset-0 bg-stone-900/60 backdrop-blur-sm z-[45]"
           />
           <motion.div
             initial={{ x: '100%' }}
@@ -486,36 +797,36 @@ function MobileNav({ isOpen, setIsOpen, activeView, setView, user, isDemoMode, o
             transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             className="fixed right-0 top-0 bottom-0 w-80 bg-white z-[50] shadow-2xl p-8 flex flex-col"
           >
-            <div className="flex items-center justify-between mb-12">
-              <h3 className="font-serif text-2xl font-bold">Menu</h3>
-              <button onClick={() => setIsOpen(false)} className="text-muted hover:text-ink">✕</button>
+            <div className="flex items-center justify-between mb-12 border-b border-border pb-4">
+              <h3 className="font-serif text-2xl font-bold text-stone-950">Menu</h3>
+              <button onClick={() => setIsOpen(false)} className="text-stone-400 hover:text-stone-900">✕</button>
             </div>
 
-            <nav className="space-y-6 flex-1">
-              <button onClick={() => setView('public')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'public' ? 'text-brand' : 'text-muted'}`}>
+            <nav className="space-y-6 flex-1 text-stone-800">
+              <button onClick={() => setView('public')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'public' ? 'text-brand font-bold' : 'text-stone-500'}`}>
                 Collection <ChevronRight size={18} />
               </button>
-              {(user || isDemoMode) && (
+              {user && (
                 <>
-                  <button onClick={() => setView('dashboard')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'dashboard' ? 'text-brand' : 'text-muted'}`}>
+                  <button onClick={() => setView('dashboard')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'dashboard' ? 'text-brand font-bold' : 'text-stone-500'}`}>
                     Dashboard <ChevronRight size={18} />
                   </button>
-                  <button onClick={() => setView('inventory')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'inventory' ? 'text-brand' : 'text-muted'}`}>
+                  <button onClick={() => setView('inventory')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'inventory' ? 'text-brand font-bold' : 'text-stone-500'}`}>
                     Inventory <ChevronRight size={18} />
                   </button>
-                  <button onClick={() => setView('orders')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'orders' ? 'text-brand' : 'text-muted'}`}>
+                  <button onClick={() => setView('orders')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'orders' ? 'text-brand font-bold' : 'text-stone-500'}`}>
                     Client Orders <ChevronRight size={18} />
+                  </button>
+                  <button onClick={() => setView('settings')} className={`w-full text-left text-lg font-medium flex items-center justify-between ${activeView === 'settings' ? 'text-brand font-bold' : 'text-stone-500'}`}>
+                    Settings <ChevronRight size={18} />
                   </button>
                 </>
               )}
             </nav>
 
             <div className="pt-8 border-t border-border space-y-4">
-              {!(user || isDemoMode) ? (
-                <>
-                  <button onClick={() => { enterDemoMode(); setIsOpen(false); }} className="w-full py-4 rounded-2xl bg-surface font-bold text-sm uppercase tracking-widest">Try Demo Mode</button>
-                  <button onClick={() => { onLogin(); setIsOpen(false); }} className="w-full luxury-button">Staff Login</button>
-                </>
+              {!user ? (
+                <button onClick={() => { onLogin(); setIsOpen(false); }} className="w-full luxury-button py-4 text-center text-white">Staff Login</button>
               ) : (
                 <button onClick={() => { onLogout(); setIsOpen(false); }} className="w-full py-4 rounded-2xl bg-rose-50 text-rose-600 font-bold text-sm uppercase tracking-widest">Logout Session</button>
               )}
@@ -528,8 +839,8 @@ function MobileNav({ isOpen, setIsOpen, activeView, setView, user, isDemoMode, o
 }
 
 // --- View: Public Gallery ---
-function PublicGallery({ products, setView, isStaff }: { products: Product[], setView: (v: View) => void, isStaff: boolean }) {
-  const WHATSAPP_NUMBER = "2349012345678"; // Replace with real number
+function PublicGallery({ products, setView, isStaff, socialSettings }: { products: Product[], setView: (v: View) => void, isStaff: boolean, socialSettings: any }) {
+  const WHATSAPP_NUMBER = socialSettings?.whatsapp || "2349012345678"; // Replace with real number
 
   const sendOrderToWhatsApp = (product: Product) => {
     const text = encodeURIComponent(`Hello Sir Larex Casual, I'm interested in buying: ${product.name} (SKU: ${product.sku}) - Price: ${product.price.toLocaleString('en-NG', { style: 'currency', currency: 'NGN' })}. Can you help me proceed with the order?`);
@@ -635,12 +946,17 @@ function PublicGallery({ products, setView, isStaff }: { products: Product[], se
           <p className="text-muted">The collection is currently being curated. Check back soon.</p>
         </div>
       )}
-      <Footer />
+      <Footer socialSettings={socialSettings} />
     </div>
   );
 }
 
-function Footer() {
+function Footer({ socialSettings }: { socialSettings: any }) {
+  const instagramUrl = socialSettings?.instagram ? `https://instagram.com/${socialSettings.instagram}` : 'https://instagram.com/sirlarex_casual';
+  const whatsappUrl = socialSettings?.whatsapp ? `https://wa.me/${socialSettings.whatsapp}` : 'https://wa.me/2349012345678';
+  const twitterUrl = socialSettings?.twitter ? `https://twitter.com/${socialSettings.twitter}` : 'https://twitter.com/sirlarex';
+  const facebookUrl = socialSettings?.facebook ? `https://facebook.com/${socialSettings.facebook}` : 'https://facebook.com/sirlarex.casual';
+
   return (
     <footer className="mt-20 py-12 border-t border-border">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-12 text-center md:text-left">
@@ -656,10 +972,13 @@ function Footer() {
         
         <div>
           <h4 className="text-xs font-black uppercase tracking-[0.2em] mb-6 text-brand">Connect</h4>
-          <ul className="space-y-3 text-sm font-medium">
-            <li><a href="#" className="hover:text-brand transition-colors">Instagram</a></li>
-            <li><a href="#" className="hover:text-brand transition-colors">WhatsApp</a></li>
-            <li><a href="#" className="hover:text-brand transition-colors">Twitter (X)</a></li>
+          <ul className="space-y-3 text-sm font-medium text-stone-700">
+            <li><a href={instagramUrl} target="_blank" rel="noopener noreferrer" className="hover:text-brand transition-colors">Instagram</a></li>
+            <li><a href={whatsappUrl} target="_blank" rel="noopener noreferrer" className="hover:text-brand transition-colors">WhatsApp</a></li>
+            <li><a href={twitterUrl} target="_blank" rel="noopener noreferrer" className="hover:text-brand transition-colors">Twitter (X)</a></li>
+            {socialSettings?.facebook && (
+              <li><a href={facebookUrl} target="_blank" rel="noopener noreferrer" className="hover:text-brand transition-colors">Facebook</a></li>
+            )}
           </ul>
         </div>
 
@@ -796,6 +1115,8 @@ function InventoryManager({ products, setProducts }: { products: Product[], setP
     imageUrl: ''
   });
 
+  const [isDragging, setIsDragging] = useState(false);
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -808,45 +1129,94 @@ function InventoryManager({ products, setProducts }: { products: Product[], setP
     }
   };
 
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      if (file.size > 2 * 1024 * 1024) return alert('Image too large (max 2MB).');
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setForm(prev => ({ ...prev, imageUrl: reader.result as string }));
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     try {
-      const isDemo = localStorage.getItem('slc_demo_mode') === 'true';
-      
       if (editingId) {
-        if (isDemo) {
-            setProducts(prev => prev.map(p => p.id === editingId ? { ...p, ...form as Product, updatedAt: new Date() } : p));
-        } else {
-            const productRef = doc(db, 'products', editingId);
-            await updateDoc(productRef, { ...form, updatedAt: new Date() });
-        }
+        const { error } = await supabase
+          .from('products')
+          .update({
+            name: form.name,
+            description: form.description,
+            price: Number(form.price),
+            category: form.category,
+            stock: Number(form.stock),
+            sku: form.sku,
+            image_url: form.imageUrl
+          })
+          .eq('id', editingId);
+
+        if (error) throw error;
+        setProducts(prev => prev.map(p => p.id === editingId ? { ...p, ...form as Product } : p));
       } else {
-        const newProduct = { ...form, id: Math.random().toString(36).substr(2, 9), createdAt: new Date() } as Product;
-        if (isDemo) {
-            setProducts(prev => [newProduct, ...prev]);
-        } else {
-            await addDoc(collection(db, 'products'), { ...form, createdAt: new Date() });
-        }
+        const { error } = await supabase
+          .from('products')
+          .insert([
+            {
+              name: form.name,
+              description: form.description,
+              price: Number(form.price),
+              category: form.category,
+              stock: Number(form.stock),
+              sku: form.sku,
+              image_url: form.imageUrl
+            }
+          ]);
+
+        if (error) throw error;
+        const newProduct = { ...form, id: Math.random().toString(36).substr(2, 9) } as Product;
+        setProducts(prev => [newProduct, ...prev]);
       }
+      
+      // Dispatch refresh sync
+      window.dispatchEvent(new CustomEvent('sync-all-data'));
+
       setShowAdd(false);
       setEditingId(null);
       setForm({ name: '', description: '', price: 0, category: '', stock: 0, sku: '', imageUrl: '' });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'products');
+    } catch (err: any) {
+      console.error(err);
+      alert(`Database write failed: ${err.message || err}`);
     }
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to delete this product?')) return;
     try {
-      const isDemo = localStorage.getItem('slc_demo_mode') === 'true';
-      if (isDemo) {
-          setProducts(prev => prev.filter(p => p.id !== id));
-      } else {
-          await deleteDoc(doc(db, 'products', id));
-      }
-    } catch (err) {
-       handleFirestoreError(err, OperationType.DELETE, `products/${id}`);
+      const { error } = await supabase
+        .from('products')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      setProducts(prev => prev.filter(p => p.id !== id));
+      window.dispatchEvent(new CustomEvent('sync-all-data'));
+    } catch (err: any) {
+       console.error(err);
+       alert(`Database delete failed: ${err.message || err}`);
     }
   };
 
@@ -907,9 +1277,16 @@ function InventoryManager({ products, setProducts }: { products: Product[], setP
               </div>
               <div className="space-y-1 md:col-span-2">
                 <label className="text-sm font-semibold text-muted pl-1">Product Visuals</label>
-                <div 
+                 <div 
                   onClick={() => fileInputRef.current?.click()}
-                  className="group relative h-48 border-2 border-dashed border-border rounded-[2rem] flex flex-col items-center justify-center gap-4 bg-surface/50 hover:bg-brand/5 hover:border-brand/40 transition-all cursor-pointer overflow-hidden"
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  className={`group relative h-48 border-2 border-dashed rounded-[2rem] flex flex-col items-center justify-center gap-4 transition-all cursor-pointer overflow-hidden ${
+                    isDragging 
+                      ? 'border-brand bg-brand/10 scale-[1.02]' 
+                      : 'border-border bg-surface/50 hover:bg-brand/5 hover:border-brand/40'
+                  }`}
                 >
                   {form.imageUrl ? (
                     <>
@@ -1028,45 +1405,59 @@ function OrderManager({ orders, products, setOrders }: { orders: Order[], produc
     if (form.items.length === 0) return alert('Add at least one item');
     
     const total = form.items.reduce((acc, curr) => acc + (curr.price * curr.quantity), 0);
-    const isDemo = localStorage.getItem('slc_demo_mode') === 'true';
+    const whatsappLink = `https://wa.me/${form.customerPhone.replace(/[^0-9]/g, '')}`;
 
     try {
-      if (isDemo) {
-          const newOrder = { 
-              ...form, 
-              id: Math.random().toString(36).substr(2, 9), 
-              total, 
-              createdAt: new Date(), 
-              updatedAt: new Date(), 
-              whatsappLink: `https://wa.me/${form.customerPhone.replace(/[^0-9]/g, '')}` 
-          } as Order;
-          setOrders(prev => [newOrder, ...prev]);
-      } else {
-          await addDoc(collection(db, 'orders'), {
-            ...form,
+      const { error } = await supabase
+        .from('orders')
+        .insert([
+          {
+            customer_name: form.customerName,
+            customer_phone: form.customerPhone,
+            items: form.items,
             total,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-            whatsappLink: `https://wa.me/${form.customerPhone.replace(/[^0-9]/g, '')}`
-          });
-      }
+            status: form.status,
+            whatsapp_link: whatsappLink
+          }
+        ]);
+
+      if (error) throw error;
+
+      // Optimistic state update
+      const newOrder = { 
+        ...form, 
+        id: Math.random().toString(36).substr(2, 9), 
+        total, 
+        createdAt: new Date().toISOString(), 
+        whatsappLink 
+      } as Order;
+      setOrders(prev => [newOrder, ...prev]);
+
+      // Trigger full database sync
+      window.dispatchEvent(new CustomEvent('sync-all-data'));
+
       setShowAdd(false);
       setForm({ customerName: '', customerPhone: '', status: 'pending', items: [] });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'orders');
+    } catch (err: any) {
+      console.error(err);
+      alert(`Database order creation failed: ${err.message || err}`);
     }
   };
 
   const updateStatus = async (id: string, newStatus: Order['status']) => {
     try {
-      const isDemo = localStorage.getItem('slc_demo_mode') === 'true';
-      if (isDemo) {
-          setOrders(prev => prev.map(o => o.id === id ? { ...o, status: newStatus, updatedAt: new Date() } : o));
-      } else {
-          await updateDoc(doc(db, 'orders', id), { status: newStatus, updatedAt: new Date() });
-      }
-    } catch (err) {
-       handleFirestoreError(err, OperationType.UPDATE, `orders/${id}`);
+      const { error } = await supabase
+        .from('orders')
+        .update({ status: newStatus })
+        .eq('id', id);
+
+      if (error) throw error;
+
+      setOrders(prev => prev.map(o => o.id === id ? { ...o, status: newStatus } : o));
+      window.dispatchEvent(new CustomEvent('sync-all-data'));
+    } catch (err: any) {
+       console.error(err);
+       alert(`Database order update failed: ${err.message || err}`);
     }
   };
 
@@ -1223,29 +1614,39 @@ function ReturnsManager({ returns, orders, setReturns }: { returns: Return[], or
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     try {
-      const isDemo = localStorage.getItem('slc_demo_mode') === 'true';
       const order = orders.find(o => o.id === form.orderId);
+      const itemsList = order?.items || [];
       
+      const { error } = await supabase
+        .from('returns')
+        .insert([
+          {
+            order_id: form.orderId,
+            reason: form.reason,
+            status: form.status,
+            items: itemsList
+          }
+        ]);
+
+      if (error) throw error;
+
+      // Optimistic state update
       const newReturn = {
         ...form,
         id: Math.random().toString(36).substr(2, 9),
-        createdAt: new Date(),
-        items: order?.items || []
+        createdAt: new Date().toISOString(),
+        items: itemsList
       } as Return;
+      setReturns(prev => [newReturn, ...prev]);
 
-      if (isDemo) {
-          setReturns(prev => [newReturn, ...prev]);
-      } else {
-          await addDoc(collection(db, 'returns'), {
-            ...form,
-            createdAt: new Date(),
-            items: order?.items || []
-          });
-      }
+      // Trigger full database sync
+      window.dispatchEvent(new CustomEvent('sync-all-data'));
+
       setShowAdd(false);
       setForm({ orderId: '', reason: '', status: 'pending' });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'returns');
+    } catch (err: any) {
+      console.error(err);
+      alert(`Database return registration failed: ${err.message || err}`);
     }
   };
 
@@ -1305,7 +1706,7 @@ function ReturnsManager({ returns, orders, setReturns }: { returns: Return[], or
                   <td className="p-6">
                     <span className="px-3 py-1 rounded-full bg-rose-50 text-rose-600 text-[10px] font-bold uppercase">{ret.status}</span>
                   </td>
-                  <td className="p-6 text-sm text-muted">{ret.createdAt?.toDate ? ret.createdAt.toDate().toLocaleDateString() : 'Today'}</td>
+                  <td className="p-6 text-sm text-muted">{ret.createdAt ? new Date(ret.createdAt).toLocaleDateString() : 'Today'}</td>
                 </tr>
               ))}
               {returns.length === 0 && <tr><td colSpan={5} className="p-10 text-center text-muted italic">No return requests found</td></tr>}
@@ -1428,6 +1829,142 @@ function ReportingSystem({ orders, products }: { orders: Order[], products: Prod
             <BarChart3 size={120} />
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// --- View: Settings Manager ---
+function SettingsManager({ socialSettings, setSocialSettings }: { socialSettings: any, setSocialSettings: React.Dispatch<React.SetStateAction<any>> }) {
+  const [isSaving, setIsSaving] = useState(false);
+  const [form, setForm] = useState({
+    instagram: socialSettings.instagram,
+    whatsapp: socialSettings.whatsapp,
+    twitter: socialSettings.twitter,
+    facebook: socialSettings.facebook
+  });
+
+  useEffect(() => {
+    setForm({
+      instagram: socialSettings.instagram,
+      whatsapp: socialSettings.whatsapp,
+      twitter: socialSettings.twitter,
+      facebook: socialSettings.facebook
+    });
+  }, [socialSettings]);
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSaving(true);
+    try {
+      const rows = [
+        { key: 'whatsapp_number', value: form.whatsapp },
+        { key: 'instagram_handle', value: form.instagram },
+        { key: 'twitter_handle', value: form.twitter },
+        { key: 'facebook_handle', value: form.facebook }
+      ];
+
+      const { error } = await supabase
+        .from('settings')
+        .upsert(rows);
+
+      if (error) throw error;
+
+      setSocialSettings({
+        instagram: form.instagram,
+        whatsapp: form.whatsapp,
+        twitter: form.twitter,
+        facebook: form.facebook
+      });
+
+      alert('Social media handles and settings updated successfully on Supabase!');
+    } catch (err: any) {
+      console.error(err);
+      alert(`Could not save settings: ${err.message || err}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-border pb-6">
+        <div>
+          <h2 className="text-3xl font-serif font-bold text-stone-900">Studio Settings</h2>
+          <p className="text-sm text-stone-500">Manage social media connections, contact channels, and communication parameters.</p>
+        </div>
+      </div>
+
+      <div className="max-w-3xl bg-white border border-border p-8 rounded-[2rem] shadow-sm">
+        <form onSubmit={handleSave} className="space-y-6">
+          <div className="space-y-4">
+            <h3 className="text-lg font-serif font-bold text-stone-900 border-b border-stone-100 pb-2">Social Channels</h3>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-1">
+                <label className="text-xs font-bold uppercase text-stone-400 pl-1">Instagram Handle</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-stone-400 text-sm">@</span>
+                  <input
+                    type="text"
+                    value={form.instagram}
+                    onChange={e => setForm(p => ({ ...p, instagram: e.target.value }))}
+                    className="w-full pl-9 pr-4 py-3 bg-stone-50 border border-stone-200 rounded-2xl focus:outline-none focus:border-brand text-stone-800 text-sm"
+                    placeholder="sirlarex_casual"
+                  />
+                </div>
+                <p className="text-[10px] text-stone-400 pl-1">Used for public footer and profile linkages.</p>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold uppercase text-stone-400 pl-1">WhatsApp Phone Number</label>
+                <input
+                  type="text"
+                  value={form.whatsapp}
+                  onChange={e => setForm(p => ({ ...p, whatsapp: e.target.value }))}
+                  className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-2xl focus:outline-none focus:border-brand text-stone-800 text-sm"
+                  placeholder="2349012345678"
+                />
+                <p className="text-[10px] text-stone-400 pl-1">Include country code without + or spaces (e.g. 2349012345678).</p>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold uppercase text-stone-400 pl-1">Twitter (X) Handle</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-stone-400 text-sm">@</span>
+                  <input
+                    type="text"
+                    value={form.twitter}
+                    onChange={e => setForm(p => ({ ...p, twitter: e.target.value }))}
+                    className="w-full pl-9 pr-4 py-3 bg-stone-50 border border-stone-200 rounded-2xl focus:outline-none focus:border-brand text-stone-800 text-sm"
+                    placeholder="sirlarex text-stone-850"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold uppercase text-stone-400 pl-1">Facebook Handle</label>
+                <input
+                  type="text"
+                  value={form.facebook}
+                  onChange={e => setForm(p => ({ ...p, facebook: e.target.value }))}
+                  className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-2xl focus:outline-none focus:border-brand text-stone-800 text-sm"
+                  placeholder="sirlarex.casual"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-stone-100 flex justify-end">
+            <button
+              type="submit"
+              disabled={isSaving}
+              className="luxury-button py-3 px-8 text-sm text-white flex items-center gap-2"
+            >
+              {isSaving ? 'Saving Changes...' : 'Save Configuration'}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
